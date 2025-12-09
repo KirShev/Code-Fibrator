@@ -2,7 +2,7 @@
   "name": "avs-replace",
   "displayName": "AVS Replace",
   "description": "Select a file, enter find/replace pairs, and generate AVS-<basename> output.",
-  "version": "0.0.1",
+  "version": "0.0.4",
   "publisher": "KirShev",
   "engines": {
     "vscode": "^1.85.0"

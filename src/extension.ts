@@ -54,6 +54,17 @@ export function activate(context: vscode.ExtensionContext) {
         } else if (msg.command === 'setStrip') {
           context.globalState.update(STATESTRIP, !!msg.value);
           panel?.webview.postMessage({ stripSaved: true });
+        } else if (msg.command === 'confirmDelete') {
+          const idx = typeof msg.index === 'number' ? msg.index : undefined;
+          const preview = [msg.find, msg.replace].filter(Boolean).join(' → ');
+          const detail = preview ? `\n${preview}` : '';
+          const choice = await vscode.window.showWarningMessage(`Supprimer cette paire ?${detail}`, { modal: true }, 'Supprimer');
+          if (msg.id) {
+            panel?.webview.postMessage({ reply: msg.id, confirmed: choice === 'Supprimer', index: idx });
+          }
+        } else if (msg.command === 'debugLog') {
+          const details = Array.isArray(msg.payload) ? msg.payload.join(' ') : String(msg.payload ?? '');
+          console.log(`[AVS Replace][webview] ${details}`);
         }
       } catch (err: any) {
         vscode.window.showErrorMessage(`Erreur: ${err?.message || String(err)}`);
@@ -88,10 +99,6 @@ function stripAllComments(text: string): string {
 }
 
 function getHtml(savedPairs: Array<{ find: string; replace: string }>, lastFile: string, stripComments: boolean): string {
-  const iconAdd = `<svg width="16" height="16" fill="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="7" stroke="#888" stroke-width="1.5" fill="#fff"/><line x1="8" y1="4" x2="8" y2="12" stroke="#555" stroke-width="2"/><line x1="4" y1="8" x2="12" y2="8" stroke="#555" stroke-width="2"/></svg>`;
-  const iconDel = `<svg width="16" height="16" fill="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="7" stroke="#999" stroke-width="1.5" fill="#fff"/><line x1="5" y1="8" x2="11" y2="8" stroke="#d00" stroke-width="2"/></svg>`;
-  const iconMove = `<svg width="12" height="16" fill="currentColor" style="cursor: grab;" aria-hidden="true"><rect x="4" y="3" width="4" height="2" rx="1" fill="#bbb"/><rect x="4" y="7" width="4" height="2" rx="1" fill="#bbb"/><rect x="4" y="11" width="4" height="2" rx="1" fill="#bbb"/></svg>`;
-
   return `<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -130,8 +137,25 @@ function getHtml(savedPairs: Array<{ find: string; replace: string }>, lastFile:
     .pairs-table { width:100%; border-collapse:separate; border-spacing:0 4px; margin:20px 0 12px 0; }
     .pairs-table th { text-align:left; font-weight:500; color:var(--muted); font-size:14px; padding-bottom:4px;}
     .pairs-table td { background:#f5f7fa; border-radius:5px; padding:3px 3px 3px 2px; vertical-align:middle;}
-    .action-btn { background:none; border:none; cursor:pointer; padding:3px 6px; display:inline-flex; align-items:center; }
-    .drag-btn { cursor:grab; padding-right:3px;}
+    .action-btn {
+      background:#fff;
+      border:1px solid #ccd;
+      border-radius:4px;
+      cursor:pointer;
+      padding:4px 8px;
+      font-size:13px;
+    }
+    .action-btn:hover { background:#eef; }
+    .drag-btn { cursor:grab; font-weight:600; }
+    .pairs-table tbody tr.dragging { opacity:.4; }
+    .pairs-table tbody tr.drag-target { box-shadow:0 4px 18px #1e2e8233; }
+    .pairs-table tbody tr.empty td {
+      background:none;
+      color:var(--muted);
+      font-style:italic;
+      padding:26px 0;
+      text-align:center;
+    }
     .float-btn {
       position:fixed; right:40px; bottom:44px; width:48px; height:48px; background:var(--primary);
       color:#fff; border-radius:50%; border:none; box-shadow:0 4px 24px #1112;
@@ -153,6 +177,21 @@ function getHtml(savedPairs: Array<{ find: string; replace: string }>, lastFile:
       z-index:500;
     }
     .toast.show { opacity:1; pointer-events:auto;}
+    .debug-panel { margin-top:24px; font-size:13px; color:var(--muted); }
+    .debug-panel[open] { color:var(--header); }
+    .debug-log {
+      background:#f0f3f9;
+      border:1px solid #d5dae3;
+      border-radius:6px;
+      padding:10px;
+      max-height:200px;
+      overflow:auto;
+      font-family:Consolas,monospace;
+      font-size:12px;
+      color:#1f2937;
+    }
+    .debug-log div { margin-bottom:4px; }
+    .debug-log div:last-child { margin-bottom:0; }
     @media(max-width:600px){
       .wrapper { max-width:99vw; margin:5vw 0 0 0; padding:10px 1vw 60px 1vw; }
       .float-btn { right:10vw; }
@@ -189,10 +228,14 @@ function getHtml(savedPairs: Array<{ find: string; replace: string }>, lastFile:
       <tbody></tbody>
     </table>
 
-    <button class="float-btn" id="addPair" title="Ajouter une paire" type="button">${iconAdd}</button>
+    <button class="float-btn" id="addPair" title="Ajouter une paire" type="button">+</button>
     <div class="btn-row">
       <button class="primary-btn" id="runBtn" type="button">Générer le fichier AVS</button>
     </div>
+    <details class="debug-panel" id="debugPanel">
+      <summary>Journal de débogage</summary>
+      <div id="debugLog" class="debug-log"></div>
+    </details>
   </div>
 
   <div class="toast" id="toast"></div>
@@ -202,8 +245,54 @@ function getHtml(savedPairs: Array<{ find: string; replace: string }>, lastFile:
     let fileUri = ${lastFile ? `'${lastFile}'` : 'null'};
     let pairs = ${JSON.stringify(savedPairs)};
     let stripComments = ${stripComments ? 'true' : 'false'};
+    let dragFrom = -1;
+    const pendingReplies = new Map();
 
     const $ = sel => document.querySelector(sel), $$ = sel => Array.from(document.querySelectorAll(sel));
+    const closestElement = (target, selector) => {
+      if (!target) return null;
+      if (target instanceof Element) return target.closest(selector);
+      if (target instanceof Node && target.parentElement) {
+        return target.parentElement.closest(selector);
+      }
+      return null;
+    };
+    const appendDebugMessage = (msg) => {
+      const container = $('#debugLog');
+      if (!container) return;
+      const entry = document.createElement('div');
+      const stamp = new Date().toLocaleTimeString();
+      entry.textContent = '[' + stamp + '] ' + msg;
+      container.appendChild(entry);
+      while (container.children.length > 200) {
+        container.removeChild(container.firstChild);
+      }
+      container.scrollTop = container.scrollHeight;
+    };
+    const debugLog = (...args) => {
+      console.log('[AVS Replace]', ...args);
+      appendDebugMessage(args.map(String).join(' '));
+      vscode.postMessage({ command: 'debugLog', payload: args.map(String) });
+    };
+    const requestHost = (command, payload = {}) => {
+      const id = Math.random().toString(36).slice(2);
+      return new Promise((resolve) => {
+        pendingReplies.set(id, resolve);
+        vscode.postMessage({ command, id, ...payload });
+        setTimeout(() => {
+          if (pendingReplies.has(id)) {
+            pendingReplies.delete(id);
+            resolve({ timeout: true });
+            debugLog('Host request timed out for command', command, 'id', id);
+          }
+        }, 15000);
+      });
+    };
+    const rowIndex = (row) => {
+      if (!row) return -1;
+      const idx = Number(row.dataset.index ?? '-1');
+      return Number.isFinite(idx) ? idx : -1;
+    };
     const showToast = msg => { const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800);};
     const updateFileBox = () => {
       const fb = $('#filePick');
@@ -223,61 +312,31 @@ function getHtml(savedPairs: Array<{ find: string; replace: string }>, lastFile:
     };
 
     function renderPairs() {
-      const tb = $('#pairs tbody'); tb.innerHTML = '';
+      const tb = $('#pairs tbody');
+      tb.innerHTML = '';
+      if (!pairs.length) {
+        const placeholder = document.createElement('tr');
+        placeholder.className = 'empty';
+        placeholder.innerHTML = '<td colspan="4">Aucune paire. Cliquez sur + pour en ajouter.</td>';
+        tb.appendChild(placeholder);
+        debugLog('Rendered pairs placeholder (0 pair)');
+        return;
+      }
+
+      const frag = document.createDocumentFragment();
       pairs.forEach((p, i) => {
-        const tr = document.createElement('tr'); tr.setAttribute('draggable','true');
+        const tr = document.createElement('tr');
+        tr.draggable = true;
         tr.dataset.index = String(i);
         tr.innerHTML =
-        '<td><input type="text" placeholder="ex: Jean" value="'+escapeHtml(p.find)+'"/></td>'+
-        '<td><input type="text" placeholder="ex: John" value="'+escapeHtml(p.replace)+'"/></td>'+
-        '<td><button class="action-btn del-btn" type="button" title="Supprimer">${iconDel}</button></td>'+
-        '<td><button class="action-btn drag-btn" type="button" title="Déplacer (glisser)">${iconMove}</button></td>';
-        tb.appendChild(tr);
-
-        // Persist edits on blur
-        const inputs = tr.querySelectorAll('input');
-        inputs[0].addEventListener('blur', () => { const idx = indexOfRow(tr); if (idx >= 0) { pairs[idx].find = inputs[0].value; savePairs(); }});
-        inputs[1].addEventListener('blur', () => { const idx = indexOfRow(tr); if (idx >= 0) { pairs[idx].replace = inputs[1].value; savePairs(); }});
-
-        // Delete handler bound directly to button to avoid delegation quirks
-        const delBtn = tr.querySelector('.del-btn');
-        if (delBtn) {
-          delBtn.addEventListener('click', () => {
-            const idx = indexOfRow(tr);
-            if (idx < 0) return;
-            if (confirm('Supprimer cette paire ?')) {
-              pairs.splice(idx, 1);
-              renderPairs();
-              savePairs();
-              showToast('Paire supprimée');
-            }
-          });
-        }
-
-        // Drag handlers
-        tr.ondragstart = e => { e.dataTransfer.effectAllowed = "move"; tr.classList.add('dragging'); e.dataTransfer.setData('fromIndex', indexOfRow(tr)); };
-        tr.ondragend = () => $$('#pairs tbody tr').forEach(t=>t.classList.remove('dragging'));
-        tr.ondragover = e => {e.preventDefault(); tr.style.boxShadow='0 4px 24px #1e2e8233';}
-        tr.ondragleave = () => tr.style.boxShadow='';
-        tr.ondrop = e => {
-          e.preventDefault(); tr.style.boxShadow='';
-          const from = +e.dataTransfer.getData('fromIndex');
-          const to = indexOfRow(tr);
-          if (Number.isFinite(from) && Number.isFinite(to) && from!==to) {
-            let [m] = pairs.splice(from,1);
-            pairs.splice(to,0,m);
-            renderPairs(); savePairs(); showToast('Réordonné');
-          }
-        };
+          '<td><input data-field="find" type="text" placeholder="ex: Jean" value="' + escapeHtml(p.find) + '"/></td>' +
+          '<td><input data-field="replace" type="text" placeholder="ex: John" value="' + escapeHtml(p.replace) + '"/></td>' +
+          '<td><button class="action-btn del-btn" type="button" title="Supprimer">Suppr.</button></td>' +
+          '<td><button class="action-btn drag-btn" type="button" title="Déplacer (glisser)">::</button></td>';
+        frag.appendChild(tr);
       });
-      if(!pairs.length) addPair();
-    }
-
-    // Note: per-row delete handler is attached above; delegation removed for reliability
-
-    function indexOfRow(tr) {
-      const rows = $$('#pairs tbody tr');
-      return rows.indexOf(tr);
+      tb.appendChild(frag);
+      debugLog('Rendered pairs rows', pairs.length);
     }
 
     function savePairs() {
@@ -290,12 +349,21 @@ function getHtml(savedPairs: Array<{ find: string; replace: string }>, lastFile:
 
     window.addEventListener('message', evt => {
       const msg = evt.data;
+      if (!msg) return;
+      if (msg.reply && pendingReplies.has(msg.reply)) {
+        const resolver = pendingReplies.get(msg.reply);
+        pendingReplies.delete(msg.reply);
+        resolver(msg);
+      }
       if (msg.saved) showToast('Modifications enregistrées!');
       if (msg.stripSaved) showToast('Option enregistrée');
     });
 
     function addPair() {
-      pairs.push({ find:'', replace:'' }); renderPairs(); savePairs();
+      pairs.push({ find:'', replace:'' });
+      renderPairs();
+      savePairs();
+      showToast('Paire ajoutée');
     }
     function getFilename(u) {
       try { return (new URL(u)).pathname.split('/').pop(); } catch { return u;}
@@ -305,27 +373,165 @@ function getHtml(savedPairs: Array<{ find: string; replace: string }>, lastFile:
         .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;");
     }
 
-    $('#addPair').onclick = addPair;
-    $('#filePick').onclick = async () => {
-      const res = await window.vscodePickFile();
-      if (res && res[0]) { fileUri = res[0]; updateFileBox(); savePairs(); }
-    };
-    $('#stripToggle').onchange = (e) => { stripComments = !!e.target.checked; saveStrip(); };
+    const tbody = $('#pairs tbody');
+    const addBtn = $('#addPair');
+    const runBtn = $('#runBtn');
+    const fileBox = $('#filePick');
+    const stripToggleEl = $('#stripToggle');
 
-    $('#runBtn').onclick = () => {
-      if (!fileUri) return showToast('Veuillez choisir un fichier!');
-      vscode.postMessage({ command:'run', fileUri, pairs, stripComments });
-    };
+    if (!(tbody instanceof HTMLElement) || !(addBtn instanceof HTMLButtonElement) || !(runBtn instanceof HTMLButtonElement) || !(fileBox instanceof HTMLElement) || !(stripToggleEl instanceof HTMLInputElement)) {
+      console.error('AVS Replace: éléments UI manquants');
+    } else {
+      const stripToggle = stripToggleEl;
 
-    window.vscodePickFile = () => new Promise(resolve => {
-      const id = Math.random().toString(36).slice(2);
-      window.addEventListener('message', function handler(ev) {
-        const m = ev.data; if (m && m.reply === id) { window.removeEventListener('message', handler); resolve(m.uris); }
+      addBtn.addEventListener('click', () => {
+        debugLog('Add button clicked');
+        addPair();
       });
-      vscode.postMessage({ command: 'pickFile', id });
-    });
+
+      fileBox.addEventListener('click', async () => {
+        debugLog('File picker requested');
+        const res = await window.vscodePickFile();
+        if (res && res[0]) {
+          fileUri = res[0];
+          updateFileBox();
+          savePairs();
+          debugLog('File selected', fileUri);
+        }
+      });
+
+      stripToggle.addEventListener('change', () => {
+        stripComments = !!stripToggle.checked;
+        saveStrip();
+        showToast('Option mise à jour');
+        debugLog('Strip toggle set to', stripComments);
+      });
+
+      runBtn.addEventListener('click', () => {
+        if (!fileUri) {
+          showToast('Veuillez choisir un fichier!');
+          debugLog('Run aborted: no file selected');
+          return;
+        }
+        vscode.postMessage({ command:'run', fileUri, pairs, stripComments });
+        debugLog('Run requested on', fileUri, 'with', pairs.length, 'pairs');
+      });
+
+      tbody.addEventListener('click', async (event) => {
+        const target = event.target;
+        const btn = closestElement(target, 'button');
+        if (!btn || !btn.classList.contains('action-btn')) return;
+        const row = closestElement(btn, 'tr');
+        const idx = rowIndex(row);
+        if (idx < 0) {
+          debugLog('Click ignoring button without index');
+          return;
+        }
+        if (btn.classList.contains('del-btn')) {
+          event.preventDefault();
+          debugLog('Confirm delete requested for index', idx);
+          const response = await requestHost('confirmDelete', { index: idx, find: pairs[idx]?.find ?? '', replace: pairs[idx]?.replace ?? '' });
+          if (!response || response.timeout) {
+            debugLog('Deletion cancelled (timeout) for index', idx);
+            return;
+          }
+          if (!response.confirmed) {
+            debugLog('Deletion cancelled by user for index', idx);
+            return;
+          }
+          debugLog('Deleting pair at index', idx);
+          pairs.splice(idx, 1);
+          renderPairs();
+          savePairs();
+          showToast('Paire supprimée');
+        }
+      });
+
+      tbody.addEventListener('input', (event) => {
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement) || !input.dataset.field) return;
+        const row = closestElement(input, 'tr');
+        const idx = rowIndex(row);
+        if (idx < 0 || !pairs[idx]) {
+          debugLog('Input change ignored, invalid index', idx);
+          return;
+        }
+        const field = input.dataset.field === 'replace' ? 'replace' : 'find';
+        pairs[idx][field] = input.value;
+        debugLog('Updated field', field, 'at index', idx, 'to', input.value);
+        savePairs();
+      });
+
+      tbody.addEventListener('dragstart', (event) => {
+        const row = closestElement(event.target, 'tr');
+        if (!row || row.classList.contains('empty')) {
+          event.preventDefault();
+          return;
+        }
+        dragFrom = rowIndex(row);
+        if (dragFrom < 0) {
+          event.preventDefault();
+          return;
+        }
+        row.classList.add('dragging');
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = 'move';
+        }
+        debugLog('Drag start from index', dragFrom);
+      });
+
+      tbody.addEventListener('dragover', (event) => {
+        const row = closestElement(event.target, 'tr');
+        if (!row || row.classList.contains('empty')) return;
+        event.preventDefault();
+        if (!row.classList.contains('dragging')) {
+          row.classList.add('drag-target');
+        }
+      });
+
+      tbody.addEventListener('dragleave', (event) => {
+        const row = closestElement(event.target, 'tr');
+        if (row) {
+          row.classList.remove('drag-target');
+        }
+      });
+
+      tbody.addEventListener('drop', (event) => {
+        const row = closestElement(event.target, 'tr');
+        if (!row || row.classList.contains('empty')) return;
+        event.preventDefault();
+        row.classList.remove('drag-target');
+        const to = rowIndex(row);
+        if (dragFrom < 0 || to < 0 || dragFrom === to) {
+          debugLog('Drop ignored', 'from', dragFrom, 'to', to);
+          return;
+        }
+        const [moved] = pairs.splice(dragFrom, 1);
+        pairs.splice(to, 0, moved);
+        renderPairs();
+        savePairs();
+        showToast('Réordonné');
+        debugLog('Moved pair from', dragFrom, 'to', to);
+      });
+
+      tbody.addEventListener('dragend', () => {
+        dragFrom = -1;
+        $$('#pairs tbody tr').forEach(function(t){ t.classList.remove('dragging', 'drag-target'); });
+        debugLog('Drag end');
+      });
+    }
+
+    window.vscodePickFile = async () => {
+      const response = await requestHost('pickFile');
+      if (response?.timeout) {
+        debugLog('File picker request timed out');
+        return [];
+      }
+      return response?.uris ?? [];
+    };
 
     updateFileBox(); renderPairs();
+    debugLog('Webview ready', 'pairs:', pairs.length, 'file:', fileUri || 'none');
   </script>
 </body>
 </html>`;
