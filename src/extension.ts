@@ -224,8 +224,9 @@ function getHtml(savedPairs: Array<{ find: string; replace: string }>, lastFile:
 
     function renderPairs() {
       const tb = $('#pairs tbody'); tb.innerHTML = '';
-      pairs.forEach((p) => {
+      pairs.forEach((p, i) => {
         const tr = document.createElement('tr'); tr.setAttribute('draggable','true');
+        tr.dataset.index = String(i);
         tr.innerHTML =
         '<td><input type="text" placeholder="ex: Jean" value="'+escapeHtml(p.find)+'"/></td>'+
         '<td><input type="text" placeholder="ex: John" value="'+escapeHtml(p.replace)+'"/></td>'+
@@ -237,6 +238,21 @@ function getHtml(savedPairs: Array<{ find: string; replace: string }>, lastFile:
         const inputs = tr.querySelectorAll('input');
         inputs[0].addEventListener('blur', () => { const idx = indexOfRow(tr); if (idx >= 0) { pairs[idx].find = inputs[0].value; savePairs(); }});
         inputs[1].addEventListener('blur', () => { const idx = indexOfRow(tr); if (idx >= 0) { pairs[idx].replace = inputs[1].value; savePairs(); }});
+
+        // Delete handler bound directly to button to avoid delegation quirks
+        const delBtn = tr.querySelector('.del-btn');
+        if (delBtn) {
+          delBtn.addEventListener('click', () => {
+            const idx = indexOfRow(tr);
+            if (idx < 0) return;
+            if (confirm('Supprimer cette paire ?')) {
+              pairs.splice(idx, 1);
+              renderPairs();
+              savePairs();
+              showToast('Paire supprimée');
+            }
+          });
+        }
 
         // Drag handlers
         tr.ondragstart = e => { e.dataTransfer.effectAllowed = "move"; tr.classList.add('dragging'); e.dataTransfer.setData('fromIndex', indexOfRow(tr)); };
@@ -257,22 +273,7 @@ function getHtml(savedPairs: Array<{ find: string; replace: string }>, lastFile:
       if(!pairs.length) addPair();
     }
 
-    // Robust event delegation for delete (works when clicking SVG/icon)
-    $('#pairs tbody').addEventListener('click', (ev) => {
-      const target = ev.target;
-      const btn = target && target.closest ? target.closest('.del-btn') : null;
-      if (!btn) return;
-      const tr = btn.closest('tr');
-      if (!tr) return;
-      const idx = indexOfRow(tr);
-      if (idx < 0) return;
-      if (confirm('Supprimer cette paire ?')) {
-        pairs.splice(idx, 1);
-        renderPairs();
-        savePairs();
-        showToast('Paire supprimée');
-      }
-    });
+    // Note: per-row delete handler is attached above; delegation removed for reliability
 
     function indexOfRow(tr) {
       const rows = $$('#pairs tbody tr');
