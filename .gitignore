@@ -1,0 +1,33 @@
+# Node.js / VS Code Extension
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+out/
+dist/
+coverage/
+
+# VS Code
+.vscode/
+.code-workspace
+
+# Env / OS
+.DS_Store
+Thumbs.db
+
+# Test/Temp
+tmp/
+temp/
+
+# VSIX package files (publish manually)
+*.vsix
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional: ignore lockfiles if you manage versions manually
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
